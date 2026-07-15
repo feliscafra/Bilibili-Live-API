@@ -1,4 +1,4 @@
-# 直播 WebSocket 消息协议（2026-06-03 更新）
+# 直播 WebSocket 消息协议（2026-07-15 更新）
 
 > 来源：`SocialSisterYi/bilibili-API-collect` + 浏览器捕获验证。
 
@@ -74,6 +74,7 @@ wss://{host}:{wss_port}/sub
 | CMD | 说明 |
 | --- | --- |
 | `SEND_GIFT` | 送礼物。含 `giftName`, `num`, `price`, `uid`, `uname`。 |
+| `SEND_GIFT_V2` | 送礼物新版（2026-07 灰度）。核心字段在 `data.data.pb`（base64 protobuf），见下节。 |
 | `COMBO_SEND` | 连击礼物。 |
 | `GIFT_STAR_PROCESS` | 礼物星球进度。 |
 | `POPULARITY_RED_POCKET_NEW` | 人气红包。 |
@@ -202,6 +203,105 @@ wss://{host}:{wss_port}/sub
 | `combo_send` / `batch_combo_send` | object | 连击信息 |
 | `blind_gift` | object/null | 盲盒礼物信息 |
 
+### SEND_GIFT_V2（protobuf 编码，2026-07 灰度中）
+
+> 2026-07 起 B 站对送礼事件灰度上线 `SEND_GIFT_V2`。实测 100 个直播间中仅个别直播间完全从 `SEND_GIFT` 切到 `SEND_GIFT_V2`，两者尚未全量替换，消费端需**同时兼容** `SEND_GIFT`（JSON）与 `SEND_GIFT_V2`（protobuf）。
+
+与旧版最大区别：核心业务字段不再是明文 JSON，而是塞进 `data.data.pb`（base64 + protobuf）。外层仍是 JSON：
+
+```json
+{
+  "cmd": "SEND_GIFT_V2",
+  "danmu": { "area": 0 },
+  "data": {
+    "dmscore": 672,
+    "pb": "CIXA2QgSCeaJ...（base64 protobuf）"
+  }
+}
+```
+
+**解析步骤**：`base64decode(data.data.pb)` → 按下方 proto 反序列化。以下字段名依据与旧版 `SEND_GIFT` JSON 的语义对照 + 实测值逆向而来，标 `?` 的为推断字段，消费端应做类型与存在性保护。
+
+```proto
+// SEND_GIFT_V2 data.data.pb 结构（逆向，字段名为推断）
+message SendGiftV2 {
+  uint64 uid          = 1;  // 送礼用户 uid
+  string uname        = 2;  // 送礼用户昵称
+  string face         = 3;  // 送礼用户头像 url
+  MedalInfo medal     = 8;  // 送礼用户佩戴的粉丝勋章
+  BlindGift blind     = 9;  // 盲盒信息（非盲盒礼物时可能缺省）
+  GiftData gift       = 10; // 礼物核心数据
+  uint32 field11      = 11; // ? 恒为 1
+  Batch  batch        = 13; // ? { field1: 连击/批次相关 }
+  UserInfo sender     = 15; // 送礼用户完整 uinfo（base + medal）
+}
+
+message MedalInfo {
+  uint64 anchor_uid   = 1;  // 勋章所属主播 uid
+  uint32 medal_level  = 5;  // 勋章等级
+  string medal_name   = 6;  // 勋章名
+  uint32 color_start  = 7;  // 勋章渐变起始色（十进制）
+  uint32 color        = 8;  // 勋章主色
+  uint32 color_border = 9;  // 勋章边框色
+  uint32 color_end    = 10; // 勋章渐变结束色
+  uint32 guard_level  = 11; // ? 大航海等级 / 点亮态
+}
+
+message BlindGift {          // 盲盒（心动盲盒等）爆出信息
+  uint32 gift_action   = 1;  // ? 状态码（实测 139）
+  uint32 original_gift_id   = 2;  // 盲盒原始礼物 id
+  string original_gift_name = 3;  // 盲盒名（如"心动盲盒"）
+  string action        = 5;  // 动作文案（"爆出"）
+  uint32 blind_price   = 6;  // 盲盒本身价格（瓜子）
+}
+
+message GiftData {
+  uint32 gift_id     = 1;   // 礼物 id
+  string gift_name   = 2;   // 礼物名（如"爱心抱枕"）
+  uint32 num         = 3;   // 数量
+  uint32 gift_type   = 4;   // ? 礼物类型
+  uint32 price       = 5;   // 单价（瓜子）
+  uint32 total_coin  = 6;   // 实付总价 = price × num
+  uint32 discount_price = 7;// ? 盲盒场景下的折算价 / 原价
+  string coin_type   = 8;   // gold=金瓜子 silver=银瓜子
+  string tid         = 9;   // 交易流水号（字符串大数）
+  uint64 timestamp   = 10;  // 送礼时间戳（秒）
+  uint32 super       = 11;  // ? 特效/礼物标记
+  string rnd         = 12;  // 批次/去重 uuid
+  uint32 field13     = 13;  // ?（实测 10）
+  uint32 field14     = 14;  // ? 总价重复（实测 16000）
+  uint32 field15     = 15;  // ?（实测 5）
+  float  gift_ratio  = 16;  // ? 礼物比率（fixed32 浮点，实测 1.0）
+  uint32 field17     = 17;  // ?
+  string action      = 18;  // 动作文案（"投喂"）
+  uint32 field24     = 24;  // ?（实测 521790）
+  Receiver receiver  = 29;  // 收礼主播 { uname, uid }
+  UserInfoWrap uinfo = 33;  // 收礼方 uinfo 包装
+  GiftEffect effect  = 35;  // 礼物特效资源图
+  uint32 field36     = 36;  // ? 总价重复（实测 16000）
+}
+
+message Receiver { string uname = 1; uint64 uid = 2; }
+
+message GiftEffect {          // 礼物动效资源
+  string img_basic = 1;      // png 基础图
+  string img_2     = 2;      // webp 图
+  string img_gif   = 5;      // gif 动图
+}
+
+message UserInfo {           // 完整用户信息（base + medal）
+  uint64 uid    = 1;
+  UserBase base = 2;         // { uname=1, face=2, ... }
+  UserMedalColored medal = 3;// 含 #FFFFFF 等十六进制颜色串
+}
+```
+
+**关键落地建议**：
+- `SEND_GIFT_V2` 与 `SEND_GIFT` 语义等价，映射关系：pb `uid/uname/face` ↔ 旧版 `uid/uname/face`；`gift.gift_id/gift_name/num/price/total_coin/coin_type/action` ↔ 旧版同名字段；`medal` ↔ `medal_info`；`blind` ↔ `blind_gift`；`sender` ↔ `sender_uinfo`。
+- 颜色字段在 pb `MedalInfo` 中为十进制整数，在 `UserInfo.medal` 中为 `#RRGGBBAA` 十六进制串（如 `#3FB4F699`），两处表示不同，勿混用。
+- `?` 字段含义未确认，切勿硬编码依赖；`total_coin`（#6）为实付金额，是计费/统计的权威字段。
+- 盲盒礼物：`blind.original_gift_name`=用户抽的盲盒名，`gift.gift_name`=实际爆出的礼物，`gift.total_coin`=盲盒购买价（非爆出礼物原价）。
+
 ### 其他高频事件
 
 | CMD | data 结构（实测） |
@@ -219,6 +319,7 @@ wss://{host}:{wss_port}/sub
 - 协议版本 3（brotli 压缩）是当前 Web 端默认，需解压后按包头递归解析。无 brotli 环境可在鉴权包改用 protover 2 走 zlib。
 - `DANMU_MSG` 的 `info` 字段是数组格式（非对象），结构见上节。
 - `SEND_GIFT` 中 `coin_type` 区分金瓜子(gold)和银瓜子(silver)礼物。
-- `INTERACT_WORD_V2`、`ONLINE_RANK_V3` 等新版事件已 **protobuf 编码**，明文 JSON 解析会失败。
+- `SEND_GIFT_V2`（2026-07 灰度）核心字段迁至 `data.data.pb`（base64 protobuf），需先解码；尚未全量替换 `SEND_GIFT`，消费端需同时兼容两者。
+- `INTERACT_WORD_V2`、`ONLINE_RANK_V3`、`SEND_GIFT_V2` 等新版事件已 **protobuf 编码**，明文 JSON 解析会失败，需先 base64 解码再按 proto 反序列化。
 - 同一个事件可能同时推送多种 CMD（如上舰同时推送 `GUARD_BUY` + `USER_TOAST_MSG` + `NOTICE_MSG`）。
 - 匿名连接（uid=0）实测被风控拒绝，需带登录态 `uid` + `buvid3`。
